@@ -132,6 +132,11 @@ def update_naukri_profile():
 
         # 2. Robust Login and Verification
         driver.get("https://login.naukri.com/")
+        with open("naukri_cookies.pkl", "rb") as file:
+        cookies = pickle.load(file)
+        for cookie in cookies:
+            driver.add_cookie(cookie)
+
         wait.until(EC.presence_of_element_located((By.ID, "usernameField"))).send_keys(NAUKRI_USERNAME)
         driver.find_element(By.ID, "passwordField").send_keys(NAUKRI_PASSWORD)
         driver.find_element(By.CSS_SELECTOR, "button.waves-effect").click()
