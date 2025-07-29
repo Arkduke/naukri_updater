@@ -121,12 +121,18 @@ def update_naukri_profile():
             "profile.default_content_settings.popups": 0,
             "profile.managed_default_content_settings.images": 2
         })
-        driver = webdriver.Chrome(options=options)
+        options.binary_location = "chromium"
+        service = Service(executable_path="chromedriver")
+    
+        # Initialize the driver with the explicit service and options
+        driver = webdriver.Chrome(service=service, options=options)
+        # --- 🚀 KEY CHANGES END ---
+    
         driver.execute_cdp_cmd(
             'Page.addScriptToEvaluateOnNewDocument',
             {'source': "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"}
         )
-        logging.info("Browser initialized in headless mode.")
+        logging.info("Browser initialized in headless mode using system binaries.")
         wait = WebDriverWait(driver, 30)
 
         # 2. Robust Login and Verification
