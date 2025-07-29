@@ -15,7 +15,6 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from selenium.webdriver.chrome.service import Service
 from dotenv import load_dotenv
 
 # --- Basic Setup ---
@@ -123,17 +122,12 @@ def update_naukri_profile():
             "profile.managed_default_content_settings.images": 2
         })
         options.binary_location = "chromium"
-        service = Service(executable_path="chromedriver")
-    
-        # Initialize the driver with the explicit service and options
-        driver = webdriver.Chrome(service=service, options=options)
-        # --- 🚀 KEY CHANGES END ---
-    
+        driver = webdriver.Chrome(options=options)
         driver.execute_cdp_cmd(
             'Page.addScriptToEvaluateOnNewDocument',
             {'source': "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"}
         )
-        logging.info("Browser initialized in headless mode using system binaries.")
+        logging.info("Browser initialized in headless mode.")
         wait = WebDriverWait(driver, 30)
 
         # 2. Robust Login and Verification
