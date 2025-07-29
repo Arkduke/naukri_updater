@@ -6,7 +6,7 @@ import logging
 import threading
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
-
+import pickle
 from google import genai
 from selenium import webdriver
 from selenium.webdriver.common.by import By
