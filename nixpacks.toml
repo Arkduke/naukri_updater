@@ -1,0 +1,8 @@
+# nixpacks.toml
+
+[phases.setup]
+# Installs system packages required for headless Chrome/Chromedriver to run.
+pkgs = [
+  "pkgs.chromium",
+  "pkgs.chromedriver"
+]
