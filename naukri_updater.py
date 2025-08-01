@@ -3,73 +3,103 @@ import time
 import schedule
 import pyperclip
 import logging
-from google import genai 
+import threading
+from fastapi import FastAPI, BackgroundTasks
+from pydantic import BaseModel
+import pickle
+from google import genai
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv
+from selenium.webdriver.chrome.service import Service as ChromeService
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 load_dotenv()
 
+# --- Environment Variables ---
 NAUKRI_USERNAME = os.environ.get("NAUKRI_USERNAME")
 NAUKRI_PASSWORD = os.environ.get("NAUKRI_PASSWORD")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-UPDATE_TIME = os.environ.get("UPDATE_TIME")
+UPDATE_TIME = os.environ.get("UPDATE_TIME", "09:30")
+CHROME_BINIARY_LOCATION = os.environ.get("CHROME_BINIARY_LOCATION")
 
-def process_text_with_gemini(text):
+app = FastAPI(
+    title="Naukri Profile Updater API",
+    description="An API to automatically update your Naukri.com profile summary and check its status.",
+    version="1.0.0"
+)
+
+job_status = {
+    "last_run_time": "N/A",
+    "last_run_status": "never_run",
+    "details": "The updater has not been run yet.",
+    "next_scheduled_run": "N/A"
+}
+
+class HealthStatus(BaseModel):
+    last_run_time: str
+    last_run_status: str
+    details: str
+    next_scheduled_run: str
+
+# --- Core Logic ---
+
+def process_text_with_gemini(text: str) -> str:
+    """Processes the profile summary using the Gemini API."""
     try:
         if not GEMINI_API_KEY:
+            logging.warning("GEMINI_API_KEY not found. Skipping text processing.")
             return text
-        
+
         client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        prompt = f"""Just change one or two words with buzzwords that will attract recruiters for the profile summary,
+        prompt = f"""Just change one or two words with buzzwords that will attract recruiters for the profile summary.
         profile summary: {text}
-        rest of the things should remain same
+        rest of the things should remain same.
         remember do not provide any options or anything else unrelated to profile summary.
         follow the profile summary format for the output do not add extra annotations.
         """
-        
-        response = client.models.generate_content(model='gemini-2.5-flash',contents=prompt)
+        response = client.models.generate_content(model='models/gemini-1.5-flash', contents=prompt)
         processed_text = response.text.strip()
-        
+
         if processed_text.startswith('"') and processed_text.endswith('"'):
             processed_text = processed_text[1:-1]
-        
+
         if len(processed_text) > 990:
             processed_text = processed_text[:995] + "..."
-        
-        logging.info("Text processed with Gemini")
+
+        logging.info("Text successfully processed with Gemini.")
         return processed_text
-        
+
     except Exception as e:
-        logging.error(f"Gemini processing failed: {e}")
+        logging.error(f"Gemini processing failed: {e}. Returning original text.")
         cleaned_text = text.strip()
         if not cleaned_text.endswith('.'):
             cleaned_text += '.'
-        
         return cleaned_text
 
 def update_naukri_profile():
-    logging.info("Starting profile update")
-    
+    """The main function to automate the Naukri profile update, using the robust working approach."""
+    job_status.update({
+        "last_run_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "last_run_status": "running",
+        "details": "Profile update process is currently running."
+    })
+    logging.info("Starting profile update...")
+
     if not NAUKRI_USERNAME or not NAUKRI_PASSWORD:
-        logging.error("Missing credentials")
+        logging.error("Missing Naukri credentials in .env file.")
+        job_status.update({"last_run_status": "failed", "details": "Missing credentials."})
         return
-    
+
+    driver = None
     try:
-        service = Service(ChromeDriverManager().install())
         options = webdriver.ChromeOptions()
-        # Enhanced headless mode with stealth options
-        options.add_argument("--headless=new")  # Use new headless mode
+        options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-notifications")
@@ -89,235 +119,150 @@ def update_naukri_profile():
             "profile.default_content_settings.popups": 0,
             "profile.managed_default_content_settings.images": 2
         })
-        driver = webdriver.Chrome(service=service, options=options)
-        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        logging.info("Browser initialized")
-    except Exception as e:
-        logging.error(f"Browser initialization failed: {e}")
-        return
+        options.binary_location = CHROME_BINIARY_LOCATION
+        service = ChromeService(executable_path="/usr/bin/chromedriver")
+        driver = webdriver.Chrome(service=service,options=options)
+        driver.execute_cdp_cmd(
+            'Page.addScriptToEvaluateOnNewDocument',
+            {'source': "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"}
+        )
+        logging.info("Browser initialized in headless mode.")
+        wait = WebDriverWait(driver, 30)
+        driver.get("https://login.naukri.com/")
 
-    try:
-        login_url = "https://login.naukri.com/"
-        driver.get(login_url)
-        logging.info("Navigated to login page")
+        wait.until(EC.presence_of_element_located((By.ID, "usernameField"))).send_keys(NAUKRI_USERNAME)
+        driver.find_element(By.ID, "passwordField").send_keys(NAUKRI_PASSWORD)
+        driver.find_element(By.CSS_SELECTOR, "button.waves-effect").click()
+        logging.info("Login attempted.")
 
-        wait = WebDriverWait(driver, 30)  # Increased timeout
-        
-        # Wait for page to load
-        time.sleep(3)
-        
-        username_field = wait.until(EC.presence_of_element_located((By.ID, "usernameField")))
-        username_field.clear()
-        username_field.send_keys(NAUKRI_USERNAME)
-        time.sleep(1)
-
-        password_field = driver.find_element(By.ID, "passwordField")
-        password_field.clear()
-        password_field.send_keys(NAUKRI_PASSWORD)
-        time.sleep(1)
-
-        login_button = driver.find_element(By.CSS_SELECTOR, "button.waves-effect")
-        login_button.click()
-        logging.info("Login attempted")
-
-        # Wait longer for login to complete with multiple checks
         login_success = False
         for attempt in range(3):
             try:
-                # Check for successful login by looking for profile elements
                 wait.until(EC.any_of(
                     EC.presence_of_element_located((By.CLASS_NAME, "nI-gNb-icon-img")),
                     EC.url_contains("mnjuser"),
                     EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'userName')]"))
                 ))
                 login_success = True
-                logging.info("Login successful")
+                logging.info("Login successful.")
                 break
             except TimeoutException:
-                logging.warning(f"Login attempt {attempt + 1} failed, retrying...")
+                logging.warning(f"Login verification attempt {attempt + 1} failed, retrying...")
                 time.sleep(5)
-        
+
         if not login_success:
-            # Take screenshot for debugging
-            driver.save_screenshot("d:/Project/naukri_updater/login_failed.png")
-            logging.error("Login failed after 3 attempts")
-            raise Exception("Login verification failed")
-        
-        # Navigate to profile page
-        profile_url = "https://www.naukri.com/mnjuser/profile"
-        driver.get(profile_url)
-        logging.info("Navigated to profile page")
-        
-        # Wait for page to load completely
-        time.sleep(5)
+            raise Exception("Login verification failed after multiple attempts.")
 
-        # Wait for page to load completely
-        time.sleep(5)
+        driver.get("https://www.naukri.com/mnjuser/profile")
+        logging.info("Navigated to profile page.")
 
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        driver.execute_script("window.scrollTo(0, 0);")
-        
-        # More comprehensive edit icon patterns
-        edit_icon_xpaths = [
-            "//div[@class='profileSummary']//div[@class='card']//div//span[@class='edit icon'][normalize-space()='editOneTheme']",
-        ]
-        
+        edit_icon_xpath = "//div[@class='profileSummary']//div[@class='card']//div//span[@class='edit icon'][normalize-space()='editOneTheme']"
         edit_icon = None
-        logging.info("Searching for edit icon...")
-        
-        # First, try to find any edit icons on the page
-        all_elements = driver.find_elements(By.XPATH, "//*[contains(@class, 'edit') or contains(text(), 'edit') or contains(@title, 'edit')]")
-        logging.info(f"Found {len(all_elements)} elements with 'edit' in them")
-        
-        for xpath in edit_icon_xpaths:
-            try:
-                scroll_positions = [0, 400, 800, 1200, 1600, 2000, 2400]
-                
-                for scroll_position in scroll_positions:
-                    driver.execute_script(f"window.scrollTo(0, {scroll_position});")
-                    time.sleep(1)
-                    
-                    try:
-                        edit_icon = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, xpath)))  # Increased timeout
-                        logging.info(f"Found edit icon with xpath: {xpath}")
-                        break
-                    except TimeoutException:
-                        continue
-                
-                if edit_icon:
-                    break
-                    
-            except TimeoutException:
-                continue
-        
-        if not edit_icon:
-            # Take a screenshot for debugging
-            driver.save_screenshot("d:/Project/naukri_updater/debug_screenshot.png")
-            logging.info("Screenshot saved as debug_screenshot.png")
-            
-            # Get page source for debugging
-            with open("d:/Project/naukri_updater/page_source.html", "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
-            logging.info("Page source saved as page_source.html")
-            
-            logging.error("Edit icon not found after trying all patterns")
-            raise Exception("Edit icon not found after trying multiple patterns and scroll positions")
-        
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", edit_icon)
-        time.sleep(2)
-        
-        try:
-            edit_icon.click()
-            logging.info("Edit icon clicked")
-        except Exception as e1:
-            try:
-                driver.execute_script("arguments[0].click();", edit_icon)
-            except Exception as e2:
-                try:
-                    actions = ActionChains(driver)
-                    actions.move_to_element(edit_icon).click().perform()
-                except Exception as e3:
-                    alternative_edit_xpath = "//span[contains(@class, 'edit') and contains(@class, 'icon')]"
-                    alternative_edits = driver.find_elements(By.XPATH, alternative_edit_xpath)
-                    for alt_edit in alternative_edits:
-                        try:
-                            if alt_edit.is_displayed() and alt_edit.is_enabled():
-                                driver.execute_script("arguments[0].click();", alt_edit)
-                                break
-                        except:
-                            continue
-                    else:
-                        raise Exception("All click methods failed")
+        logging.info("Searching for edit icon with scrolling...")
 
-        # More comprehensive textarea patterns
-        textarea_xpaths = [
-            "//textarea[@id='profileSummaryTxt']",
-        ]
-        
-        textarea = None
-        logging.info("Searching for textarea...")
-        
-        for xpath in textarea_xpaths:
+        scroll_positions = [0, 400, 800, 1200, 1600, 2000]
+        for scroll_position in scroll_positions:
+            driver.execute_script(f"window.scrollTo(0, {scroll_position});")
+            time.sleep(1)
             try:
-                textarea = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
-                logging.info(f"Found textarea with xpath: {xpath}")
+                edit_icon = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, edit_icon_xpath)))
+                logging.info(f"Found edit icon with xpath: {edit_icon_xpath}")
                 break
             except TimeoutException:
                 continue
-        
-        if not textarea:
-            all_textareas = driver.find_elements(By.TAG_NAME, "textarea")
-            all_editables = driver.find_elements(By.XPATH, "//div[@contenteditable='true']")
-            logging.info(f"Found {len(all_textareas)} textareas and {len(all_editables)} editable divs")
-            
-            if all_textareas:
-                textarea = all_textareas[0]
-                logging.info("Using first available textarea")
-            elif all_editables:
-                textarea = all_editables[0]
-                logging.info("Using first available editable div")
-            else:
-                logging.error("No textarea or editable element found")
-                raise Exception("Textarea not found after trying multiple patterns")
-        
-        textarea.click()
-        time.sleep(1)
-        logging.info("Textarea found and focused")
-        
-        current_text = textarea.get_attribute("value") or textarea.text
-        
-        textarea.send_keys(Keys.CONTROL + "a")
-        time.sleep(0.5)
-        
-        textarea.send_keys(Keys.CONTROL + "c")
-        time.sleep(0.5)
-        
+
+        if not edit_icon:
+            raise Exception("Edit icon not found after trying multiple scroll positions.")
+
         try:
-            original_text = pyperclip.paste()
-            if not original_text or original_text.strip() == "":
-                original_text = current_text
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", edit_icon)
+            time.sleep(1)
+            edit_icon.click()
+            logging.info("Edit icon clicked successfully.")
         except Exception as e:
-            original_text = current_text
-        
+            logging.warning(f"Standard click failed: {e}. Trying JavaScript click.")
+            driver.execute_script("arguments[0].click();", edit_icon)
+            logging.info("Edit icon clicked via JavaScript.")
+
+        textarea = wait.until(EC.element_to_be_clickable((By.ID, "profileSummaryTxt")))
+        logging.info("Textarea found.")
+
+        current_text = textarea.get_attribute("value") or textarea.text
+        original_text = current_text
+
+        try:
+            textarea.send_keys(Keys.CONTROL + "a")
+            time.sleep(0.5)
+            textarea.send_keys(Keys.CONTROL + "c")
+            time.sleep(0.5)
+            clipboard_text = pyperclip.paste()
+            if clipboard_text and clipboard_text.strip():
+                original_text = clipboard_text
+        except Exception as e:
+            logging.warning(f"Could not use pyperclip: {e}. Using value attribute as fallback.")
+
+        processed_text = ""
         if original_text and original_text.strip():
             processed_text = process_text_with_gemini(original_text)
-            
             textarea.clear()
             time.sleep(0.5)
             textarea.send_keys(processed_text)
-        
-        time.sleep(2)
+            logging.info("Updated textarea with new profile summary.")
+        else:
+            logging.warning("Profile summary textarea was empty. No changes made.")
 
-        save_button_xpath = "//button[normalize-space()='Save']"
-        save_button = wait.until(EC.element_to_be_clickable((By.XPATH, save_button_xpath)))
-        
+        save_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[normalize-space()='Save']")))
         save_button.click()
-        logging.info("Save button clicked")
-        
+        logging.info("Save button clicked.")
+
         wait.until(EC.presence_of_element_located((By.XPATH, "//p[@class='head']")))
         logging.info("Profile update completed successfully")
 
-    except TimeoutException:
-        logging.error("Timeout occurred")
-    except NoSuchElementException as e:
-        logging.error("Element not found")
+        logging.info("Profile update completed and verified successfully.")
+        job_status.update({"last_run_status": "success", "details": "Profile updated successfully."})
+
     except Exception as e:
-        logging.error(f"Update failed: {e}")
+        logging.error(f"An error occurred during the profile update: {e}", exc_info=True)
+        job_status.update({"last_run_status": "failed", "details": str(e)})
+        if driver:
+            driver.save_screenshot("naukri_update_failed.png")
+            with open("naukri_update_failed.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
     finally:
-        driver.quit()
-        logging.info("Browser closed")
+        if driver:
+            driver.quit()
+        logging.info("Browser closed.")
+        job_status["next_scheduled_run"] = str(schedule.next_run()) if schedule.jobs else "Not scheduled"
 
 
-if __name__ == "__main__":
-    logging.info(f"Scheduler started - runs daily at {UPDATE_TIME}")
+def run_scheduler():
+    """Runs the scheduled jobs in a loop."""
+    logging.info(f"Scheduler configured to run daily at {UPDATE_TIME}.")
+    job_status["next_scheduled_run"] = str(schedule.next_run()) if schedule.jobs else "Not scheduled"
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+
+@app.on_event("startup")
+def startup_event():
+    """On app startup, schedule the job and start the scheduler thread."""
     schedule.every().day.at(UPDATE_TIME).do(update_naukri_profile)
-    # update_naukri_profile()
-    
-    try:
-        while True:
-            schedule.run_pending()
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logging.info("Scheduler stopped")
-        pass
+    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+    scheduler_thread.start()
+    logging.info("Scheduler thread started.")
 
+# --- API Endpoints ---
+@app.post("/update-profile", status_code=202)
+def trigger_update(background_tasks: BackgroundTasks):
+    """Manually triggers the Naukri profile update in the background."""
+    if job_status["last_run_status"] == "running":
+        return {"message": "An update process is already running. Please wait for it to complete."}
+
+    background_tasks.add_task(update_naukri_profile)
+    return {"message": "Profile update process has been started in the background."}
+
+@app.get("/status", response_model=HealthStatus)
+def get_health_status():
+    """Returns the current health and status of the updater job."""
+    job_status["next_scheduled_run"] = str(schedule.next_run()) if schedule.jobs else "Not scheduled"
+    return job_status
